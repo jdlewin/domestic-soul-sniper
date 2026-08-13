@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Tooling / IDE
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local / secrets — never commit
+*.RAF
+*.raf
+*.pp3.bak
+logs/
+.session-cache/
+
+# User runtime lives outside the repo; keep accidents out
+config.local.yaml

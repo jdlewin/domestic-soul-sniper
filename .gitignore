@@ -31,3 +31,6 @@ logs/
 
 # User runtime lives outside the repo; keep accidents out
 config.local.yaml
+
+# Session notes
+session-ses_*.md

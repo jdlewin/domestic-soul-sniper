@@ -1,6 +1,6 @@
 # domestic-soul-sniper — Lean v1 Plan
 
-**Status:** committed for record before implementation  
+**Status:** lean v1 implemented (smoke-verified 2026-08-13)  
 **Date:** 2026-08-13  
 **Scope:** agent-assisted photography toolkit for Fujifilm X-E3 monochrome (ACROS)
 

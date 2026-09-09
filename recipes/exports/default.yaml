@@ -1,0 +1,11 @@
+# Default export pack for lean v1
+strip_sensitive: true
+
+print:
+  quality: 95
+  # full resolution; sRGB via ImageMagick/RT output
+
+web:
+  long_edge: 2048
+  quality: 88
+  sharpen: true

@@ -65,14 +65,13 @@ def run_export(cfg: UserConfig, session: Session, pack: str = "default") -> Sess
         graded = [g for g in graded if g.stem in targets]
 
     spec = _load_export_spec(pack)
-    print_spec = spec.get("print") or {}
     web_spec = spec.get("web") or {}
-    print_q = int(print_spec.get("quality") or 95)
     web_q = int(web_spec.get("quality") or 88)
     web_edge = int(web_spec.get("long_edge") or 2048)
     strip = bool(spec.get("strip_sensitive", True))
 
     magick = _magick(cfg)
+    web_fullres_fallback = False
     print_dir = session.export_print_dir()
     web_dir = session.export_web_dir()
     print_dir.mkdir(parents=True, exist_ok=True)
@@ -85,29 +84,18 @@ def run_export(cfg: UserConfig, session: Session, pack: str = "default") -> Sess
         print_dest = print_dir / f"{src.stem}_print.jpg"
         web_dest = web_dir / f"{src.stem}_web.jpg"
 
-        # print: copy/re-encode at high quality sRGB
-        if magick:
-            cmd = [
-                magick,
-                str(src),
-                "-colorspace",
-                "sRGB",
-                "-quality",
-                str(print_q),
-                str(print_dest),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if proc.returncode != 0:
-                shutil.copy2(src, print_dest)
-        else:
-            shutil.copy2(src, print_dest)
+        # print: graded JPEG is already full-res sRGB q95 from RT — copy,
+        # don't decompress/re-encode (pure generation loss). Was: magick
+        # re-encode at q95 on every export.
+        shutil.copy2(src, print_dest)
         print_outs.append(print_dest)
 
         if magick:
             _resize_long_edge(magick, src, web_dest, web_edge, web_q)
         else:
-            # no magick: copy full res as web fallback
+            # no magick: full-res copy is NOT a 2048 web file — flag loudly.
             shutil.copy2(src, web_dest)
+            web_fullres_fallback = True
         web_outs.append(web_dest)
 
     if strip:
@@ -122,8 +110,11 @@ def run_export(cfg: UserConfig, session: Session, pack: str = "default") -> Sess
 
     session.counts["export_print"] = len(print_outs)
     session.counts["export_web"] = len(web_outs)
+    session.counts["export_web_fullres_fallback"] = int(web_fullres_fallback)
     session.stages.exported = True
     save_session(session)
+    if web_fullres_fallback:
+        print("WARNING: magick not found — web exports are full-res copies, NOT 2048px")
     return session
 
 

@@ -27,6 +27,37 @@ def _sha256(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _exiftool_batch(paths: list[Path], exiftool: str) -> dict[str, dict[str, str]]:
+    """Single exiftool spawn for all paths. Returns {str(path): tags}."""
+    import json as _json
+
+    if not paths:
+        return {}
+    cmd = [
+        exiftool,
+        "-j",
+        "-fast",
+        "-DateTimeOriginal",
+        "-CreateDate",
+        "-Model",
+        "-FileName",
+        *(str(p) for p in paths),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as e:
+        raise RuntimeError("exiftool not found") from e
+    try:
+        arr = _json.loads(proc.stdout or "[]")
+    except ValueError:
+        arr = []
+    out: dict[str, dict[str, str]] = {}
+    for entry in arr:
+        src = str(entry.get("SourceFile", ""))
+        out[src] = {k: str(v) for k, v in entry.items() if isinstance(v, str)}
+    return out
+
+
 def _exiftool_json(path: Path, exiftool: str) -> dict[str, str]:
     cmd = [
         exiftool,
@@ -103,6 +134,27 @@ def build_dest_name(dt: datetime, camera: str, original_name: str) -> str:
     return f"{dt.strftime('%Y%m%d_%H%M%S')}_{camera}_{stem}.RAF"
 
 
+def _copy_hashed(src: Path, dest: Path, chunk: int = 1024 * 1024) -> str:
+    """Copy src->dest while hashing the bytes written. Returns sha256 hex."""
+    import hashlib as _hashlib
+
+    h = _hashlib.sha256()
+    with src.open("rb") as fin, dest.open("wb") as fout:
+        while True:
+            block = fin.read(chunk)
+            if not block:
+                break
+            h.update(block)
+            fout.write(block)
+    shutil.copystat(src, dest)
+    digest = h.hexdigest()
+    # single verification read of dest (was: read src + dest separately)
+    if _sha256(dest) != digest:
+        dest.unlink(missing_ok=True)
+        raise IOError(f"Checksum mismatch after copy: {src} -> {dest}")
+    return digest
+
+
 def import_photos(
     cfg: UserConfig,
     source: Path,
@@ -124,9 +176,27 @@ def import_photos(
             raise ValueError("--limit must be >= 1")
         rafs = rafs[:limit]
 
+    # One exiftool spawn for the whole batch (was: 2 spawns per file).
+    batch = _exiftool_batch(rafs, exiftool)
+
+    def _meta_for(p: Path) -> dict[str, str]:
+        if str(p) in batch:
+            return batch[str(p)]
+        # fallback for files exiftool skipped (single-file path)
+        return _exiftool_json(p, exiftool)
+
+    def _tag(meta: dict[str, str], *keys: str) -> str | None:
+        for k in keys:
+            if meta.get(k):
+                return meta[k]
+        # legacy "Key: value" spaced names from _exiftool_json fallback
+        return None
+
     # Determine session date from first file if not provided
-    first_meta = _exiftool_json(rafs[0], exiftool)
-    first_dt = _parse_dt(first_meta.get("Date/Time Original") or first_meta.get("Create Date"))
+    first_meta = _meta_for(rafs[0])
+    first_dt = _parse_dt(
+        _tag(first_meta, "DateTimeOriginal", "Date/Time Original", "CreateDate", "Create Date")
+    )
     if first_dt is None:
         first_dt = datetime.fromtimestamp(rafs[0].stat().st_mtime)
 
@@ -150,16 +220,23 @@ def import_photos(
     log_lines: list[str] = []
 
     for src in rafs:
-        meta = _exiftool_json(src, exiftool)
-        dt = _parse_dt(meta.get("Date/Time Original") or meta.get("Create Date"))
+        meta = _meta_for(src)
+        dt = _parse_dt(
+            _tag(meta, "DateTimeOriginal", "Date/Time Original", "CreateDate", "Create Date")
+        )
         if dt is None:
             dt = datetime.fromtimestamp(src.stat().st_mtime)
-        camera = _camera_token(meta.get("Camera Model Name") or meta.get("Model"))
+            log_lines.append(f"WARN no EXIF date for {src.name}; using mtime")
+        camera = _camera_token(
+            _tag(meta, "Model", "Camera Model Name")
+            or meta.get("Model")
+            or meta.get("Camera Model Name")
+        )
         dest_name = build_dest_name(dt, camera, src.name)
         dest = session.raw_dir() / dest_name
 
         if dest.exists():
-            # verify existing
+            # verify existing (dest read once; src read once)
             existing_hash = _sha256(dest)
             src_hash = _sha256(src)
             if existing_hash == src_hash:
@@ -175,12 +252,7 @@ def import_photos(
                 n += 1
             dest_name = dest.name
 
-        shutil.copy2(src, dest)
-        digest = _sha256(dest)
-        src_digest = _sha256(src)
-        if digest != src_digest:
-            dest.unlink(missing_ok=True)
-            raise IOError(f"Checksum mismatch after copy: {src} -> {dest}")
+        digest = _copy_hashed(src, dest)
         checksums[dest_name] = digest
         copied += 1
         log_lines.append(f"OK {src.name} -> {dest_name} sha256={digest[:12]}…")

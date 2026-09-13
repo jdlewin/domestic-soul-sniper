@@ -27,43 +27,54 @@ def process(
     jpeg_quality: int = 92,
     fast: bool = False,
     log_path: Path | None = None,
+    chunk_size: int = 10,
 ) -> list[Path]:
-    """Batch-process inputs to JPEG in output_dir. Returns output paths."""
+    """Batch-process inputs to JPEG in output_dir, chunked sequentially.
+
+    Chunking keeps peak RSS bounded on 16 GB boxes (RT holds one
+    demosaiced frame at a time, but a single huge argv batch gives no
+    progress and no isolation on failure). Returns output paths.
+    """
     if not inputs:
         return []
     rt = find_cli(cli)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd: list[str] = [rt, "-Y", "-o", str(output_dir)]
-    if fast:
-        cmd.append("-f")
     for pp3 in pp3_files:
         if not pp3.is_file():
             raise RawTherapeeError(f"PP3 not found: {pp3}")
-        cmd.extend(["-p", str(pp3)])
     q = max(1, min(100, jpeg_quality))
-    cmd.append(f"-j{q}")
-    cmd.append("-js3")  # best chroma quality (irrelevant for B&W but fine)
-    cmd.append("-c")
-    cmd.extend(str(p) for p in inputs)
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    logs: list[str] = []
+    chunk_size = max(1, chunk_size)
+    for i in range(0, len(inputs), chunk_size):
+        chunk = inputs[i : i + chunk_size]
+        cmd: list[str] = [rt, "-Y", "-o", str(output_dir)]
+        if fast:
+            cmd.append("-f")
+        for pp3 in pp3_files:
+            cmd.extend(["-p", str(pp3)])
+        cmd.append(f"-j{q}")
+        cmd.append("-js3")  # best chroma quality (irrelevant for B&W but fine)
+        cmd.append("-c")
+        cmd.extend(str(p) for p in chunk)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        logs.append(
+            f"CHUNK {i // chunk_size + 1} n={len(chunk)} exit={proc.returncode}\n"
+            f"STDOUT:\n{proc.stdout or ''}\nSTDERR:\n{proc.stderr or ''}\n"
+        )
+        if proc.returncode != 0:
+            if log_path is not None:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    "CMD: " + " ".join(cmd) + "\n\n" + "\n".join(logs), encoding="utf-8"
+                )
+            raise RawTherapeeError(
+                f"rawtherapee-cli failed ({proc.returncode}): {(proc.stderr or proc.stdout or '')[:500]}"
+            )
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            "CMD: "
-            + " ".join(cmd)
-            + "\n\nSTDOUT:\n"
-            + (proc.stdout or "")
-            + "\n\nSTDERR:\n"
-            + (proc.stderr or "")
-            + f"\n\nexit={proc.returncode}\n",
-            encoding="utf-8",
-        )
-    if proc.returncode != 0:
-        raise RawTherapeeError(
-            f"rawtherapee-cli failed ({proc.returncode}): {(proc.stderr or proc.stdout or '')[:500]}"
-        )
+        log_path.write_text("\n".join(logs) + "\n", encoding="utf-8")
 
     outs: list[Path] = []
     for src in inputs:

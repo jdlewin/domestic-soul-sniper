@@ -53,8 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Import at most N RAF files (smoke/dev)",
     )
 
-    proof = sub.add_parser("proof", help="Write neutral fast proof JPEGs")
+    proof = sub.add_parser("proof", help="Write fast proof JPEGs (embedded previews)")
     proof.add_argument("session", type=Path, help="Session directory")
+    proof.add_argument(
+        "--selects-only",
+        action="store_true",
+        help="Only proof frames listed in selects/ (default: all raws)",
+    )
+    proof.add_argument(
+        "--no-rt-fallback",
+        action="store_true",
+        help="Skip RawTherapee fallback for frames without embedded previews",
+    )
 
     grade = sub.add_parser("grade", help="Grade with film stock (default: acros)")
     grade.add_argument("session", type=Path, help="Session directory")
@@ -73,7 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="keywords",
         help="Keyword (repeatable)",
     )
-    meta.add_argument("--gps", default=None, help="LAT,LON")
+    meta.add_argument("--gps", default=None, help="LAT,LON or Google Maps link")
+    meta.add_argument(
+        "--time-shift",
+        default=None,
+        help="Shift capture dates, e.g. +2h, -90m, +1:30 (camera clock fix)",
+    )
     meta.add_argument(
         "--strip-gps",
         action="store_true",
@@ -91,6 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show session status")
     status.add_argument("session", type=Path, help="Session directory")
     status.add_argument("--json", action="store_true", dest="as_json")
+
+    web = sub.add_parser("web", help="Local visual cull UI (proof grid)")
+    web.add_argument("--port", type=int, default=8000, help="Port (default: 8000)")
 
     return p
 
@@ -122,10 +140,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+        if args.command == "web":
+            from .web import run_web
+
+            run_web(cfg, port=int(args.port))
+            return 0
+
         session = load_session(args.session)
 
         if args.command == "proof":
-            session = run_proof(cfg, session)
+            session = run_proof(
+                cfg,
+                session,
+                selects_only=bool(args.selects_only),
+                use_rt_fallback=not bool(args.no_rt_fallback),
+            )
             print(f"Proofs: {session.counts.get('proof_neutral')} -> {session.proof_neutral_dir()}")
             return 0
 
@@ -145,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 keywords=list(args.keywords or []),
                 gps=args.gps,
                 strip_gps=bool(args.strip_gps),
+                time_shift=args.time_shift,
             )
             print(f"Tagged {session.counts.get('meta_tagged')} files")
             return 0

@@ -29,6 +29,7 @@ def build_status(session: Session) -> dict[str, Any]:
         "keywords": session.keywords,
         "gps": session.gps,
         "strip_gps": session.strip_gps,
+        "time_shift": session.time_shift,
         "stages": {
             "imported": session.stages.imported,
             "proofed": session.stages.proofed,
@@ -40,6 +41,7 @@ def build_status(session: Session) -> dict[str, Any]:
             "raw": len(raws),
             "proof_neutral": len(proofs),
             "selects": None if selects is None else len(selects),
+            "rejects": len(session.reject_stems()),
             "grade_targets": len(session.target_raws()),
             "graded": len(graded),
             "export_print": len(prints),

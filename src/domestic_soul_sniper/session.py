@@ -13,6 +13,7 @@ SESSION_FILENAME = "session.yaml"
 RAW_DIR = "raw"
 PROOF_NEUTRAL_DIR = "proof/neutral"
 SELECTS_DIR = "selects"
+REJECTS_DIR = "rejects"
 EXPORT_PRINT_DIR = "export/print"
 EXPORT_WEB_DIR = "export/web"
 LOGS_DIR = "logs"
@@ -39,6 +40,7 @@ class Session:
     keywords: list[str] = field(default_factory=list)
     gps: str | None = None  # "lat,lon" or None
     strip_gps: bool = False
+    time_shift: str | None = None  # normalized "+H:MM:SS" applied to capture dates
     stages: SessionStages = field(default_factory=SessionStages)
     counts: dict[str, int] = field(default_factory=dict)
     checksums: dict[str, str] = field(default_factory=dict)  # basename -> sha256
@@ -55,6 +57,9 @@ class Session:
 
     def selects_dir(self) -> Path:
         return self.root() / SELECTS_DIR
+
+    def rejects_dir(self) -> Path:
+        return self.root() / REJECTS_DIR
 
     def export_print_dir(self) -> Path:
         return self.root() / EXPORT_PRINT_DIR
@@ -73,6 +78,7 @@ class Session:
             self.raw_dir(),
             self.proof_neutral_dir(),
             self.selects_dir(),
+            self.rejects_dir(),
             self.export_print_dir(),
             self.export_web_dir(),
             self.logs_dir(),
@@ -115,21 +121,49 @@ class Session:
             stems.append(stem)
         return sorted(set(stems))
 
+    def reject_stems(self) -> set[str]:
+        """Stems marked reject. Always excluded from grade/export targets."""
+        rej = self.rejects_dir()
+        if not rej.is_dir():
+            return set()
+        out: set[str] = set()
+        for p in rej.iterdir():
+            if p.name.startswith("."):
+                continue
+            if p.is_file() or p.is_symlink():
+                out.add(Path(p.name).stem)
+        return out
+
+    def _is_rejected(self, stem: str, orig: str, rejected: set[str]) -> bool:
+        return bool(rejected) and any(
+            r == stem or r == orig or stem.endswith(r) for r in rejected
+        )
+
     def target_raws(self) -> list[Path]:
         raws = self.list_raws()
+        rejected = self.reject_stems()
         stems = self.select_stems()
         if stems is None:
-            return raws
-        # match if select stem equals full stem or original DSCF part or is contained
-        matched: list[Path] = []
-        for raw in raws:
+            candidates = raws
+        else:
+            # match if select stem equals full stem or original DSCF part
+            candidates = []
+            for raw in raws:
+                stem = raw.stem
+                orig = stem.split("_")[-1] if "_" in stem else stem
+                for s in stems:
+                    if s == stem or s == orig or stem.endswith(s) or s in stem:
+                        candidates.append(raw)
+                        break
+        if not rejected:
+            return candidates
+        out = []
+        for raw in candidates:
             stem = raw.stem
             orig = stem.split("_")[-1] if "_" in stem else stem
-            for s in stems:
-                if s == stem or s == orig or stem.endswith(s) or s in stem:
-                    matched.append(raw)
-                    break
-        return matched
+            if not self._is_rejected(stem, orig, rejected):
+                out.append(raw)
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -155,6 +189,7 @@ class Session:
             keywords=list(data.get("keywords") or []),
             gps=data.get("gps"),
             strip_gps=bool(data.get("strip_gps") or False),
+            time_shift=data.get("time_shift"),
             stages=stages,
             counts=dict(data.get("counts") or {}),
             checksums=dict(data.get("checksums") or {}),

@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -107,6 +108,89 @@ def _parse_dt(value: str | None) -> datetime | None:
     return None
 
 
+def parse_correct_dt(value: str | None, fallback_time: datetime | None = None) -> datetime | None:
+    """Parse user-supplied correct datetime for the first frame.
+
+    Accepts 'YYYY-MM-DD HH:MM[:SS]', 'YYYY/MM/DD HH:MM', EXIF 'YYYY:MM:DD HH:MM:SS',
+    or a bare date (time taken from fallback_time or 00:00). Returns naive datetime.
+    """
+    if value is None:
+        return None
+    text = value.strip().replace("/", "-").replace(":", "-", 2) if False else value.strip()
+    # normalize separators: allow YYYY:MM:DD and YYYY/MM/DD
+    import re as _re
+
+    text = _re.sub(r"^(\d{4})[/:](\d{2})[/:](\d{2})", r"\1-\2-\3", text)
+    text = _re.sub(r"T", " ", text).strip()
+    fmts = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y-%m-%d %H%M",
+    )
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%Y-%m-%d" and fallback_time is not None:
+                dt = dt.replace(
+                    hour=fallback_time.hour,
+                    minute=fallback_time.minute,
+                    second=fallback_time.second,
+                )
+            return dt
+        except ValueError:
+            continue
+    raise ValueError(
+        f"bad datetime {value!r}: want 'YYYY-MM-DD HH:MM[:SS]' e.g. 2026-09-25 17:07"
+    )
+
+
+def resolve_correction(
+    first_name: str,
+    first_dt: datetime,
+    *,
+    correct_dt: datetime | None = None,
+    prompt: bool = True,
+) -> tuple[datetime, int]:
+    """Return (effective_first_dt, offset_seconds).
+
+    If correct_dt given, delta = correct - EXIF. Else if prompt and a TTY,
+    ask to confirm; on 'n' loop for a replacement datetime. Non-TTY or
+    --yes path returns EXIF unchanged.
+    """
+    import sys
+
+    if correct_dt is not None:
+        return correct_dt, int((correct_dt - first_dt).total_seconds())
+    if not prompt or not sys.stdin.isatty():
+        return first_dt, 0
+    print(f"First image: {first_name}  EXIF capture: {first_dt:%Y-%m-%d %H:%M:%S}")
+    try:
+        ans = input("Is this date/time correct? [Y/n] ").strip().lower()
+    except EOFError:
+        return first_dt, 0
+    if ans in ("", "y", "yes"):
+        return first_dt, 0
+    while True:
+        try:
+            raw = input(
+                "Enter CORRECT date/time for FIRST image [YYYY-MM-DD HH:MM]: "
+            ).strip()
+        except EOFError:
+            return first_dt, 0
+        if not raw:
+            print("Keeping EXIF datetime.")
+            return first_dt, 0
+        try:
+            fixed = parse_correct_dt(raw, fallback_time=first_dt)
+        except ValueError as e:
+            print(f"  {e}")
+            continue
+        delta = int((fixed - first_dt).total_seconds())
+        print(f"  Correction: {delta:+d}s ({delta / 3600:+.2f}h) applied to all {first_name}…")
+        return fixed, delta
+
+
 def _camera_token(model: str | None) -> str:
     if not model:
         return "X-E3"
@@ -162,6 +246,11 @@ def import_photos(
     name: str | None = None,
     shoot_date: date | None = None,
     limit: int | None = None,
+    correct_dt: datetime | str | None = None,
+    prompt: bool = True,
+    gps: str | None = None,
+    only_basenames: list[str] | set[str] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> Session:
     exiftool = cfg.tools.get("exiftool") or shutil.which("exiftool")
     if not exiftool:
@@ -171,10 +260,22 @@ def import_photos(
     rafs = list_source_rafs(source)
     if not rafs:
         raise FileNotFoundError(f"No RAF files under {source}")
+    if only_basenames:
+        want = {n for n in only_basenames}
+        rafs = [p for p in rafs if p.name in want]
+        if not rafs:
+            raise FileNotFoundError("Selected files matched nothing under source")
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit must be >= 1")
         rafs = rafs[:limit]
+
+    gps_norm: str | None = None
+    if gps:
+        from .meta import parse_gps_input
+
+        lat_s, lon_s = parse_gps_input(gps)
+        gps_norm = f"{lat_s},{lon_s}"
 
     # One exiftool spawn for the whole batch (was: 2 spawns per file).
     batch = _exiftool_batch(rafs, exiftool)
@@ -200,7 +301,16 @@ def import_photos(
     if first_dt is None:
         first_dt = datetime.fromtimestamp(rafs[0].stat().st_mtime)
 
-    sess_date = shoot_date or first_dt.date()
+    if isinstance(correct_dt, str):
+        correct_dt = parse_correct_dt(correct_dt, fallback_time=first_dt)
+    effective_first, offset = resolve_correction(
+        rafs[0].name, first_dt, correct_dt=correct_dt, prompt=prompt
+    )
+    from datetime import timedelta as _td
+
+    _delta = _td(seconds=offset)
+
+    sess_date = shoot_date or effective_first.date()
     slug = name or "shoot"
     session_path = make_session_dir(cfg.archive_path(), sess_date, slug)
 
@@ -211,6 +321,10 @@ def import_photos(
         camera="X-E3",
         stock=cfg.default_stock or "acros",
         source=str(source),
+        original_first_dt=first_dt.isoformat(timespec="seconds"),
+        corrected_first_dt=effective_first.isoformat(timespec="seconds"),
+        dt_offset_seconds=offset,
+        gps=gps_norm,
     )
     session.ensure_dirs()
 
@@ -218,8 +332,13 @@ def import_photos(
     copied = 0
     skipped = 0
     log_lines: list[str] = []
+    if offset:
+        log_lines.append(
+            f"CORRECTION first={first_dt:%Y-%m-%d %H:%M:%S} "
+            f"corrected={effective_first:%Y-%m-%d %H:%M:%S} offset={offset:+d}s"
+        )
 
-    for src in rafs:
+    for idx, src in enumerate(rafs, 1):
         meta = _meta_for(src)
         dt = _parse_dt(
             _tag(meta, "DateTimeOriginal", "Date/Time Original", "CreateDate", "Create Date")
@@ -227,6 +346,8 @@ def import_photos(
         if dt is None:
             dt = datetime.fromtimestamp(src.stat().st_mtime)
             log_lines.append(f"WARN no EXIF date for {src.name}; using mtime")
+        if offset:
+            dt = dt + _delta
         camera = _camera_token(
             _tag(meta, "Model", "Camera Model Name")
             or meta.get("Model")
@@ -243,6 +364,11 @@ def import_photos(
                 checksums[dest_name] = existing_hash
                 skipped += 1
                 log_lines.append(f"SKIP exists {src.name} -> {dest_name}")
+                if progress is not None:
+                    try:
+                        progress(idx, len(rafs), dest_name)
+                    except Exception:
+                        pass
                 continue
             # collision different content
             stem = dest.stem
@@ -256,6 +382,11 @@ def import_photos(
         checksums[dest_name] = digest
         copied += 1
         log_lines.append(f"OK {src.name} -> {dest_name} sha256={digest[:12]}…")
+        if progress is not None:
+            try:
+                progress(idx, len(rafs), dest_name)
+            except Exception:
+                pass
 
     session.checksums = checksums
     session.counts = {
@@ -270,6 +401,79 @@ def import_photos(
     log_path = session.logs_dir() / "import.log"
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
     return session
+
+
+def scan_source(
+    cfg: UserConfig, source: Path, *, correct_dt: datetime | str | None = None
+) -> dict:
+    """List RAFs under source with EXIF datetimes + per-day groups.
+
+    Applies correct_dt delta (if given) to corrected_dts for preview.
+    Used by web UI pre-import planning. Read-only, no copies.
+    """
+    import shutil as _shutil
+
+    exiftool = cfg.tools.get("exiftool") or _shutil.which("exiftool")
+    if not exiftool:
+        raise RuntimeError("exiftool is required for scan")
+    source = source.expanduser().resolve()
+    rafs = list_source_rafs(source)
+    if not rafs:
+        raise FileNotFoundError(f"No RAF files under {source}")
+    batch = _exiftool_batch(rafs, exiftool)
+
+    files: list[dict] = []
+    for p in rafs:
+        meta = batch.get(str(p), {})
+        dt = _parse_dt(
+            meta.get("DateTimeOriginal") or meta.get("CreateDate") or ""
+        )
+        if dt is None:
+            dt = datetime.fromtimestamp(p.stat().st_mtime)
+        files.append({"name": p.name, "dt": dt.isoformat(timespec="seconds")})
+
+    first_dt = datetime.fromisoformat(files[0]["dt"])
+    corr: datetime | None = None
+    if isinstance(correct_dt, str) and correct_dt.strip():
+        corr = parse_correct_dt(correct_dt, fallback_time=first_dt)
+    elif isinstance(correct_dt, datetime):
+        corr = correct_dt
+    offset = int((corr - first_dt).total_seconds()) if corr else 0
+
+    from datetime import timedelta as _td
+
+    groups: dict[str, list[dict]] = {}
+    for f in files:
+        dt = datetime.fromisoformat(f["dt"])
+        cdt = dt + _td(seconds=offset) if offset else dt
+        f["corrected_dt"] = cdt.isoformat(timespec="seconds")
+        day = cdt.date().isoformat()
+        groups.setdefault(day, []).append(f)
+
+    out_groups = []
+    for day in sorted(groups):
+        fs = groups[day]
+        out_groups.append(
+            {
+                "date": day,
+                "count": len(fs),
+                "first": fs[0]["name"],
+                "last": fs[-1]["name"],
+                "first_dt": fs[0]["corrected_dt"],
+                "last_dt": fs[-1]["corrected_dt"],
+                "files": [f["name"] for f in fs],
+                "suggest_slug": f"shoot-{day[5:].replace('-', '')}",
+            }
+        )
+    return {
+        "source": str(source),
+        "count": len(files),
+        "first_name": files[0]["name"],
+        "first_dt": files[0]["dt"],
+        "corrected_first_dt": (corr or first_dt).isoformat(timespec="seconds"),
+        "offset_seconds": offset,
+        "groups": out_groups,
+    }
 
 
 def _slug_from_path(path: Path) -> str:

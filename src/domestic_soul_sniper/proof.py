@@ -88,4 +88,42 @@ def run_proof(
     session.counts["proof_rt_fallback"] = len(missing) if use_rt_fallback else 0
     session.stages.proofed = True
     save_session(session)
+    tag_proof_metadata(cfg, session, produced)
     return session
+
+
+def tag_proof_metadata(
+    cfg: UserConfig, session: Session, files: list[Path] | None = None
+) -> int:
+    """Write import correction (dates) + session GPS into proof JPEGs.
+
+    RAF masters stay pristine (checksummed); proofs are derivatives, so the
+    cull UI reads corrected capture datetimes and locations straight away.
+    Returns number of files updated.
+    """
+    from .meta import gps_args, offset_shift_args
+
+    targets = files if files is not None else sorted(
+        session.proof_neutral_dir().glob("*.jpg")
+    ) + sorted(session.proof_neutral_dir().glob("*.JPG"))
+    if not targets:
+        return 0
+    args = offset_shift_args(int(getattr(session, "dt_offset_seconds", 0) or 0))
+    args.extend(gps_args(session.gps))
+    if not args:
+        return 0
+    et = _exiftool(cfg)
+    if not et:
+        return 0
+    cmd = [et, "-overwrite_original", "-P", "-q", *args, *(str(p) for p in targets)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return 0
+    (session.logs_dir() / "proof-meta.log").write_text(
+        f"tagged={len(targets)} offset={getattr(session, 'dt_offset_seconds', 0)} "
+        f"gps={session.gps}\n{(proc.stdout or '')}\n{(proc.stderr or '')}\n"
+        f"exit={proc.returncode}\n",
+        encoding="utf-8",
+    )
+    return len(targets) if proc.returncode == 0 else 0

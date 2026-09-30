@@ -19,6 +19,7 @@ from pathlib import Path
 from .config import UserConfig
 from .session import SESSION_FILENAME, Session, load_session, save_session
 from .status import build_status
+from .tune import PARAMS, load_tune, save_tune
 
 # view name -> session subdir accessor
 def _view_dir(session: Session, view: str) -> Path:
@@ -62,6 +63,8 @@ button{cursor:pointer}button:hover{background:#333}
 #light.kept img{border-color:#4caf50}
 #light.rejected img{border-color:#c62828}
 #lightcap{margin-top:8px;font-size:14px;color:#ccc}
+#lightmeta{margin-bottom:8px;font-size:14px;color:#eee;background:rgba(0,0,0,.7);padding:4px 12px;border-radius:6px}
+#lightmeta .gps{color:#9ccc9c}
 header.sub{background:#141414;font-size:12px}
 .pill{display:inline-block;padding:2px 8px;border-radius:10px;margin-right:6px;background:#222;color:#888;border:1px solid #333}
 .pill.on{background:#1b3a1b;color:#9ccc9c;border-color:#2e7d32}
@@ -69,6 +72,10 @@ header.sub{background:#141414;font-size:12px}
 #meta-cur{font-size:12px;color:#888}
 button:disabled{opacity:.4;cursor:wait}
 input{background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px 10px;font-size:14px}
+#tune{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.tctl{display:flex;gap:6px;align-items:center;font-size:12px;color:#bbb}
+.tctl input[type=range]{width:110px;accent-color:#9ccc9c;padding:0;border:none;background:transparent}
+.tctl b{color:#eee;min-width:42px;text-align:right;font-weight:600}
 </style></head><body>
 <header>
 <select id="sess"></select>
@@ -78,10 +85,31 @@ input{background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding
 <option value="print">print</option>
 <option value="web">web</option>
 </select>
-<button id="b-grade" title="develop targets with ACROS (slow, ~6s/frame)">grade</button>
+<button id="b-grade" title="develop targets with selected ACROS stock (slow, ~6s/frame)">grade</button>
+<select id="stock" title="film stock for grade + preview">
+<option value="acros">acros</option>
+<option value="acros-ye">acros-ye</option>
+<option value="acros-r">acros-r</option>
+<option value="acros-g">acros-g</option>
+</select>
 <button id="b-export" title="write print + web JPEGs">export</button>
 <button id="none">clear flags</button>
+<button id="b-import-toggle" title="plan an import: dates, GPS, split days into named sessions">⇪ import</button>
 </header>
+<div id="import-panel" style="display:none;background:#141414;border-bottom:1px solid #222;padding:12px 16px;font-size:13px">
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<input id="imp-source" size="36" placeholder="~/Pictures/676_FUJI or /run/media/…" title="source folder with RAFs">
+<input id="imp-correct" size="22" placeholder="correct 1st datetime YYYY-MM-DD HH:MM" title="correct capture datetime for FIRST image — delta applied to all">
+<input id="imp-gps" size="26" placeholder="GPS LAT,LON or Maps link (optional)" title="stored on each new session for meta">
+<button id="b-scan">scan</button>
+<span id="imp-status" style="color:#888"></span>
+</div>
+<div id="imp-groups" style="margin-top:10px"></div>
+<div style="margin-top:8px;display:flex;gap:10px;align-items:center">
+<button id="b-do-import">import planned sessions</button>
+<span id="imp-job" style="color:#ffcc80"></span>
+</div>
+</div>
 <header class="sub">
 <input id="gps" placeholder="paste Google Maps link or LAT,LON" size="34" title="shoot location — applied to graded files">
 <input id="shift" placeholder="+2h / -90m" size="10" title="shift capture dates (camera clock fix)">
@@ -90,13 +118,19 @@ input{background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding
 <span id="meta-cur"></span>
 </header>
 <header class="sub">
+<span style="color:#9ccc9c">grade tune:</span>
+<span id="tune"></span>
+<button id="b-preview" title="save tune + grade focused frame for compare (switch view to graded)">preview ★</button>
+<button id="b-tune-reset" title="reset tune to acros defaults">reset</button>
+</header>
+<header class="sub">
 <span id="pills"></span>
 <span id="job"></span>
 <span id="bar"></span>
 <span id="help">←→↑↓/hjkl move · F fullscreen · P pick · X reject · U unflag · Enter tag · Esc back</span>
 </header>
 <div id="grid"></div>
-<div id="light"><img id="lightimg"><div id="lightcap"></div></div>
+<div id="light"><div id="lightmeta"></div><img id="lightimg"><div id="lightcap"></div></div>
 <script>
 let SESS=null, ITEMS=[], FOCUS=0, FULL=false, VIEW='proofs', POLL=null;
 async function api(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}
@@ -104,7 +138,7 @@ async function loadSessions(){
   const ss=await api('/api/sessions');
   const sel=document.getElementById('sess');
   sel.innerHTML=ss.map(s=>`<option value="${s.path}">${s.date} ${s.name} (${s.raw})</option>`).join('');
-  if(ss.length){SESS=sel.value;sel.onchange=()=>{SESS=sel.value;FOCUS=0;load();};load();}
+  if(ss.length){SESS=sel.value;sel.onchange=()=>{SESS=sel.value;FOCUS=0;load();loadTune();};load();loadTune();}
   else document.getElementById('bar').textContent='no sessions — run photo import first';
 }
 async function load(keepFocus=true){
@@ -118,6 +152,7 @@ async function load(keepFocus=true){
   document.getElementById('pills').innerHTML=pills+` <span style="color:#666">targets=${c.grade_targets} graded=${c.graded} print=${c.export_print} web=${c.export_web}</span>`;
   document.getElementById('meta-cur').textContent=
     `gps: ${d.gps||'—'} · shift: ${d.time_shift||'—'} · kw: ${(d.keywords||[]).join(', ')||'—'}`;
+  if(d.stock)document.getElementById('stock').value=d.stock;
   render();
 }
 function imgUrl(i){return '/img?path='+encodeURIComponent(SESS)+'&view='+VIEW+'&file='+encodeURIComponent(i.file);}
@@ -147,6 +182,9 @@ function showLight(){
   L.classList.add('open');L.classList.remove('kept','rejected');
   if(i.state)L.classList.add(i.state==='keep'?'kept':'rejected');
   document.getElementById('lightimg').src='/img?path='+encodeURIComponent(SESS)+'&view='+VIEW+'&file='+encodeURIComponent(i.file);
+  document.getElementById('lightmeta').innerHTML=
+    `${i.stem} · ${i.dt||'no date'} · `+
+    (i.gps?`<span class="gps">📍${i.gps}</span>`:'no location');
   const meta=[i.dt||'no date',(i.gps?'📍'+i.gps:'no location')].join(' · ');
   document.getElementById('lightcap').textContent=`${FOCUS+1}/${ITEMS.length} ${i.stem} [${i.state||'unflagged'}] · ${meta} — P pick · X reject · U unflag · F close`;
 }
@@ -174,12 +212,13 @@ async function run(op){
     if(op==='meta'){body.keywords=document.getElementById('kw').value;
       body.gps=document.getElementById('gps').value;
       body.time_shift=document.getElementById('shift').value;}
+    if(op==='grade')body.stock=document.getElementById('stock').value;
     await api('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     job.textContent=`${op} running…`;
     POLL=setInterval(async()=>{
       try{
         const j=await api('/api/job?path='+encodeURIComponent(SESS));
-        if(j.state==='running'){job.textContent=`${j.op} running…`;return;}
+        if(j.state==='running'){job.textContent=j.log?`${j.op}: ${j.log}`:`${j.op} running…`;return;}
         clearInterval(POLL);POLL=null;
         job.textContent=j.state==='done'?`${j.op} done: ${j.log}`:`${j.op} FAILED: ${j.error}`;
         load();
@@ -191,6 +230,55 @@ async function run(op){
 document.getElementById('b-grade').onclick=()=>run('grade');
 document.getElementById('b-export').onclick=()=>run('export');
 document.getElementById('b-meta').onclick=()=>run('meta');
+document.getElementById('b-preview').onclick=()=>previewFocused();
+document.getElementById('b-tune-reset').onclick=async()=>{
+  if(!TUNE_RANGES)return;
+  const d={};for(const[k,v]of Object.entries(TUNE_RANGES))d[k]=v.default;
+  await saveTune(d);loadTune();
+};
+let TUNE={}, TUNE_RANGES=null, TUNE_T=null;
+async function loadTune(){
+  if(!SESS)return;
+  try{
+    const t=await api('/api/tune?path='+encodeURIComponent(SESS));
+    TUNE=t.params;TUNE_RANGES=t.ranges;renderTune();
+  }catch(e){document.getElementById('tune').textContent='tune load failed: '+e.message;}
+}
+function renderTune(){
+  const box=document.getElementById('tune');
+  box.innerHTML=Object.entries(TUNE_RANGES).map(([k,r])=>{
+    const v=TUNE[k]??r.default;
+    return `<span class="tctl">${k}<input type="range" data-k="${k}" min="${r.min}" max="${r.max}" step="${r.step}" value="${v}"><b data-b="${k}">${v}</b></span>`;
+  }).join('');
+  box.querySelectorAll('input[type=range]').forEach(el=>{
+    el.oninput=()=>{
+      const k=el.dataset.k;TUNE[k]=parseFloat(el.value);
+      box.querySelector(`[data-b="${k}"]`).textContent=el.value;
+      clearTimeout(TUNE_T);TUNE_T=setTimeout(()=>saveTune(TUNE),400);
+    };
+  });
+}
+async function saveTune(p){
+  await api('/api/tune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:SESS,params:p??TUNE})});
+}
+async function previewFocused(){
+  if(!ITEMS.length)return;
+  await saveTune(TUNE);
+  const stem=ITEMS[FOCUS].stem;
+  const stock=document.getElementById('stock').value;
+  const job=document.getElementById('job');
+  job.textContent=`preview ${stem} running…`;
+  try{
+    await api('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:SESS,op:'preview',stems:[stem],stock})});
+    const iv=setInterval(async()=>{
+      const j=await api('/api/job?path='+encodeURIComponent(SESS));
+      if(j.state==='running'){job.textContent=`preview running…`;return;}
+      clearInterval(iv);
+      job.textContent=j.state==='done'?`preview done: ${j.log} — switch view to graded to compare`:`preview FAILED: ${j.error}`;
+      load();
+    },1000);
+  }catch(e){job.textContent='preview failed: '+e.message;}
+}
 document.getElementById('view').onchange=e=>{VIEW=e.target.value;FOCUS=0;FULL=false;document.getElementById('light').classList.remove('open');load();};
 function move(d){
   if(!ITEMS.length)return;
@@ -222,6 +310,58 @@ document.addEventListener('keydown',e=>{
 });
 document.getElementById('light').onclick=e=>{if(e.target.id==='light')closeLight();};
 document.getElementById('none').onclick=async()=>{await api('/api/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:SESS})});FOCUS=0;load();};
+document.getElementById('b-import-toggle').onclick=()=>{
+  const p=document.getElementById('import-panel');
+  p.style.display=p.style.display==='none'?'block':'none';
+};
+let IMP_SCAN=null;
+document.getElementById('b-scan').onclick=scanSource;
+async function scanSource(){
+  const st=document.getElementById('imp-status'), box=document.getElementById('imp-groups');
+  st.textContent='scanning…';box.innerHTML='';
+  try{
+    const body={source:document.getElementById('imp-source').value.trim(),
+      correct_dt:document.getElementById('imp-correct').value.trim()||null};
+    if(!body.source){st.textContent='enter a source folder first';return;}
+    IMP_SCAN=await api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const off=IMP_SCAN.offset_seconds;
+    st.textContent=`${IMP_SCAN.count} RAF · first ${IMP_SCAN.first_name} ${IMP_SCAN.first_dt}`+
+      (off?` → corrected ${IMP_SCAN.corrected_first_dt} (${off>0?'+':''}${(off/3600).toFixed(2)}h)`:' · dates look right');
+    box.innerHTML=IMP_SCAN.groups.map((g,i)=>`<label style="display:flex;gap:10px;align-items:center;margin:6px 0">
+      <input type="checkbox" data-inc="${i}" checked>
+      <b>${g.date}</b><span style="color:#888">${g.count} files · ${g.first} → ${g.last}</span>
+      <input data-slug="${i}" size="26" value="${g.suggest_slug}" title="session name slug">
+      <input data-day="${i}" size="12" value="${g.date}" title="session date (folder YYYY-MM-DD-…)">
+    </label>`).join('');
+  }catch(e){st.textContent='scan failed: '+e.message;}
+}
+document.getElementById('b-do-import').onclick=async()=>{
+  const job=document.getElementById('imp-job');
+  if(!IMP_SCAN){job.textContent='scan a source first';return;}
+  const sessions=[...document.querySelectorAll('#imp-groups [data-inc]')].map((cb,i)=>{
+    if(!cb.checked)return null;
+    const slug=document.querySelector(`[data-slug="${i}"]`).value.trim();
+    const day=document.querySelector(`[data-day="${i}"]`).value.trim();
+    return {name:slug,date:day||IMP_SCAN.groups[i].date,files:IMP_SCAN.groups[i].files};
+  }).filter(Boolean);
+  if(!sessions.length){job.textContent='tick at least one day-group';return;}
+  try{
+    await api('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      source:IMP_SCAN.source,
+      correct_dt:document.getElementById('imp-correct').value.trim()||null,
+      gps:document.getElementById('imp-gps').value.trim()||null,
+      sessions})});
+    const key=IMP_SCAN.source;
+    job.textContent='import starting…';
+    const iv=setInterval(async()=>{
+      const j=await api('/api/job?path='+encodeURIComponent(key));
+      if(j.state==='running'){job.textContent='import: '+(j.log||'working…');return;}
+      clearInterval(iv);
+      job.textContent=j.state==='done'?`import done: ${j.log}`:`import FAILED: ${j.error}`;
+      loadSessions();
+    },1000);
+  }catch(e){job.textContent='import failed: '+e.message;}
+};
 loadSessions();
 </script></body></html>
 """
@@ -364,10 +504,125 @@ def _set_mark(session: Session, stem: str, mark: str) -> None:
     save_session(session)
 
 
+def _allowed_source(path: Path) -> Path:
+    """Resolve + constrain import sources to known roots (no arbitrary FS reads)."""
+    p = path.expanduser().resolve()
+    roots = [
+        Path.home() / "Pictures",
+        Path("/run/media"),
+        Path("/mnt"),
+        Path("/tmp"),
+    ]
+    if not p.is_dir():
+        raise NotADirectoryError(f"import source is not a directory: {p}")
+    for r in roots:
+        try:
+            p.relative_to(r.resolve() if r.exists() else r)
+            return p
+        except ValueError:
+            continue
+    raise PermissionError(
+        f"source outside allowed roots (~/Pictures, /run/media, /mnt, /tmp): {p}"
+    )
+
+
+def _do_import_job(
+    cfg: UserConfig,
+    job_key: str,
+    source: str,
+    correct_dt: str | None,
+    gps: str | None,
+    sessions: list[dict],
+) -> None:
+    """Background multi-session import. Records outcome in _jobs[job_key]."""
+    from datetime import date as _date
+
+    from .import_card import import_photos
+
+    t0 = time.time()
+    try:
+        made: list[str] = []
+        total = 0
+        proofs_total = 0
+        n = len(sessions)
+        for i, spec in enumerate(sessions, 1):
+            name = str(spec.get("name") or "shoot").strip() or "shoot"
+            files = spec.get("files") or None
+            day = spec.get("date")
+            shoot_date = None
+            if day:
+                shoot_date = _date.fromisoformat(str(day))
+            nfiles = len(files) if files else 0
+            with _jobs_lock:
+                _jobs[job_key] = {
+                    "state": "running", "op": "import",
+                    "log": f"session {i}/{n}: {name} — copying 0/{nfiles} files",
+                    "error": "", "updated": time.time(),
+                }
+
+            def _prog(done: int, total: int, _fn: str = "",
+                      _i: int = i, _n: int = n, _name: str = name) -> None:
+                with _jobs_lock:
+                    _jobs[job_key] = {
+                        "state": "running", "op": "import",
+                        "log": f"session {_i}/{_n} {_name}: copying {done}/{total} files",
+                        "error": "", "updated": time.time(),
+                    }
+
+            sess = import_photos(
+                cfg,
+                Path(source),
+                name=name,
+                shoot_date=shoot_date,
+                correct_dt=(correct_dt or None),
+                prompt=False,
+                gps=(gps or None),
+                only_basenames=list(files) if files else None,
+                progress=_prog,
+            )
+            made.append(str(sess.root()))
+            total += int(sess.counts.get("imported_copied", 0))
+            # Auto-proof so the proofs view populates immediately after import.
+            with _jobs_lock:
+                _jobs[job_key] = {
+                    "state": "running", "op": "import",
+                    "log": f"session {i}/{n}: {name} — {total} files in, writing proofs…",
+                    "error": "", "updated": time.time(),
+                }
+            from .proof import run_proof
+
+            sess = run_proof(cfg, sess)
+            proofs_total += int(sess.counts.get("proof_neutral", 0))
+            with _jobs_lock:
+                _jobs[job_key] = {
+                    "state": "running", "op": "import",
+                    "log": f"session {i}/{n}: {name} done ({proofs_total} proofs so far)…",
+                    "error": "", "updated": time.time(),
+                }
+        dt = time.time() - t0
+        with _jobs_lock:
+            _jobs[job_key] = {
+                "state": "done",
+                "op": "import",
+                "log": f"sessions={len(made)} files={total} proofs={proofs_total} ({dt:.0f}s): {'; '.join(made)}",
+                "error": "",
+                "updated": time.time(),
+            }
+    except Exception as e:  # noqa: BLE001 — surfaced to UI poll
+        with _jobs_lock:
+            _jobs[job_key] = {
+                "state": "error",
+                "op": "import",
+                "log": "",
+                "error": str(e),
+                "updated": time.time(),
+            }
+
+
 def _do_job(cfg: UserConfig, path: str, op: str, extra: dict) -> None:
     """Background worker: run one pipeline op, record outcome in _jobs."""
     from .export import run_export
-    from .grade import run_grade
+    from .grade import run_grade, run_preview
     from .meta import run_meta
     from .proof import run_proof
 
@@ -380,6 +635,12 @@ def _do_job(cfg: UserConfig, path: str, op: str, extra: dict) -> None:
         elif op == "grade":
             s = run_grade(cfg, s, stock=extra.get("stock"))
             log = f"graded={s.counts.get('graded')}/{s.counts.get('grade_targets')}"
+        elif op == "preview":
+            stems = extra.get("stems") or []
+            if isinstance(stems, str):
+                stems = [stems]
+            outs = run_preview(cfg, s, list(stems), stock=extra.get("stock"))
+            log = f"preview={','.join(outs)}"
         elif op == "meta":
             kws = [k.strip() for k in str(extra.get("keywords", "")).split(",") if k.strip()]
             gps_in = (extra.get("gps") or "").strip() or None
@@ -434,6 +695,7 @@ def run_web(cfg: UserConfig, port: int = 8000) -> None:
                     "items": _items(cfg, s, view),
                     "stages": st["stages"],
                     "counts": st["counts"],
+                    "stock": s.stock,
                     "keywords": s.keywords,
                     "gps": s.gps,
                     "strip_gps": s.strip_gps,
@@ -447,6 +709,17 @@ def run_web(cfg: UserConfig, port: int = 8000) -> None:
                 with _jobs_lock:
                     job = dict(_jobs.get(path, {"state": "idle"}))
                 self._send(json.dumps(job).encode())
+            elif u.path == "/api/tune":
+                try:
+                    s = _resolve_session(cfg, q.get("path", [""])[0])
+                except Exception as e:
+                    self.send_error(400, str(e))
+                    return
+                self._send(json.dumps({
+                    "params": load_tune(s.root()),
+                    "ranges": {k: {"default": v[0], "min": v[1], "max": v[2], "step": v[3]}
+                               for k, v in PARAMS.items()},
+                }).encode())
             elif u.path == "/img":
                 try:
                     s = _resolve_session(cfg, q.get("path", [""])[0])
@@ -474,6 +747,56 @@ def run_web(cfg: UserConfig, port: int = 8000) -> None:
                 data = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 self.send_error(400, "bad json")
+                return
+            if u.path == "/api/scan":
+                try:
+                    src = _allowed_source(Path(str(data.get("source", ""))))
+                except Exception as e:
+                    self.send_error(400, str(e))
+                    return
+                try:
+                    from .import_card import scan_source
+
+                    out = scan_source(
+                        cfg, src, correct_dt=data.get("correct_dt") or None
+                    )
+                except Exception as e:
+                    self.send_error(400, str(e))
+                    return
+                self._send(json.dumps(out).encode())
+                return
+            if u.path == "/api/import":
+                try:
+                    src = _allowed_source(Path(str(data.get("source", ""))))
+                except Exception as e:
+                    self.send_error(400, str(e))
+                    return
+                sessions = data.get("sessions") or []
+                if not sessions:
+                    self.send_error(400, "no sessions planned (scan first, name each day)")
+                    return
+                for spec in sessions:
+                    if not str(spec.get("name") or "").strip():
+                        self.send_error(400, "each session needs a name slug")
+                        return
+                job_key = str(src)
+                with _jobs_lock:
+                    cur = _jobs.get(job_key, {}).get("state", "idle")
+                    if cur == "running":
+                        self.send_error(409, "import already running")
+                        return
+                    _jobs[job_key] = {"state": "running", "op": "import", "log": "",
+                                      "error": "", "updated": time.time()}
+                t = threading.Thread(
+                    target=_do_import_job,
+                    args=(cfg, job_key, str(src),
+                          data.get("correct_dt") or None,
+                          data.get("gps") or None,
+                          list(sessions)),
+                    daemon=True,
+                )
+                t.start()
+                self._send(json.dumps({"ok": True, "op": "import"}).encode())
                 return
             try:
                 s = _resolve_session(cfg, str(data.get("path", "")))
@@ -511,7 +834,7 @@ def run_web(cfg: UserConfig, port: int = 8000) -> None:
                 self._send(b'{"ok":true}')
             elif u.path == "/api/run":
                 op = str(data.get("op", ""))
-                if op not in ("proof", "grade", "meta", "export"):
+                if op not in ("proof", "grade", "meta", "export", "preview"):
                     self.send_error(400, f"bad op {op!r}")
                     return
                 path = str(s.root())
@@ -523,11 +846,19 @@ def run_web(cfg: UserConfig, port: int = 8000) -> None:
                     _jobs[path] = {"state": "running", "op": op, "log": "",
                                    "error": "", "updated": time.time()}
                 extra = {"stock": data.get("stock"), "keywords": data.get("keywords", ""),
-                         "gps": data.get("gps"), "time_shift": data.get("time_shift")}
+                         "gps": data.get("gps"), "time_shift": data.get("time_shift"),
+                         "stems": data.get("stems") or data.get("stem")}
                 t = threading.Thread(target=_do_job, args=(cfg, path, op, extra),
                                      daemon=True)
                 t.start()
                 self._send(json.dumps({"ok": True, "op": op}).encode())
+            elif u.path == "/api/tune":
+                try:
+                    params = save_tune(s.root(), data.get("params", {}))
+                except ValueError as e:
+                    self.send_error(400, str(e))
+                    return
+                self._send(json.dumps({"ok": True, "params": params}).encode())
             else:
                 self.send_error(404)
 

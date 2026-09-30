@@ -41,6 +41,9 @@ class Session:
     gps: str | None = None  # "lat,lon" or None
     strip_gps: bool = False
     time_shift: str | None = None  # normalized "+H:MM:SS" applied to capture dates
+    original_first_dt: str | None = None  # EXIF of first RAF before correction
+    corrected_first_dt: str | None = None  # user-confirmed capture datetime
+    dt_offset_seconds: int = 0  # corrected - original, applied to all dts at import
     stages: SessionStages = field(default_factory=SessionStages)
     counts: dict[str, int] = field(default_factory=dict)
     checksums: dict[str, str] = field(default_factory=dict)  # basename -> sha256
@@ -190,6 +193,9 @@ class Session:
             gps=data.get("gps"),
             strip_gps=bool(data.get("strip_gps") or False),
             time_shift=data.get("time_shift"),
+            original_first_dt=data.get("original_first_dt"),
+            corrected_first_dt=data.get("corrected_first_dt"),
+            dt_offset_seconds=int(data.get("dt_offset_seconds") or 0),
             stages=stages,
             counts=dict(data.get("counts") or {}),
             checksums=dict(data.get("checksums") or {}),

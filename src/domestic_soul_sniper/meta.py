@@ -83,17 +83,15 @@ def run_meta(
     if session.strip_gps:
         cmd.extend(["-GPS:all=", "-xmp:geotag="])
     elif session.gps:
-        lat_s, lon_s = _parse_gps(session.gps)
-        cmd.append(f"-GPSLatitude={lat_s}")
-        cmd.append(f"-GPSLongitude={lon_s}")
-        cmd.append(f"-GPSLatitudeRef={'N' if float(lat_s) >= 0 else 'S'}")
-        cmd.append(f"-GPSLongitudeRef={'E' if float(lon_s) >= 0 else 'W'}")
+        cmd.extend(gps_args(session.gps))
 
     if shift:
         sign = "+" if shift.startswith("+") else "-"
         mag = shift[1:]  # H:MM:SS
         for tag in ("DateTimeOriginal", "CreateDate", "ModifyDate"):
             cmd.append(f"-{tag}{sign}={mag}")
+    # Import-stage camera-clock correction (uniform offset, may span years).
+    cmd.extend(offset_shift_args(int(getattr(session, "dt_offset_seconds", 0) or 0)))
 
     cmd.extend(str(p) for p in files)
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -127,6 +125,41 @@ def _parse_gps(value: str) -> tuple[str, str]:
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError(f"GPS out of range: {value}")
     return parts[0], parts[1]
+
+
+def offset_shift_args(offset_seconds: int) -> list[str]:
+    """Exiftool date-shift args for a uniform second offset.
+
+    Decomposes into whole days + h:m:s so year-scale import corrections
+    (e.g. -31546817s = -365d -3:00:17) apply exactly to naive EXIF datetimes.
+    Returns [] when offset is 0.
+    """
+    if not offset_seconds:
+        return []
+    sign = "+" if offset_seconds > 0 else "-"
+    rest = abs(int(offset_seconds))
+    days, rest = divmod(rest, 86400)
+    h, rest = divmod(rest, 3600)
+    m, s = divmod(rest, 60)
+    stamp = f"0:0:{days} {h}:{m:02d}:{s:02d}"
+    return [
+        f"-DateTimeOriginal{sign}={stamp}",
+        f"-CreateDate{sign}={stamp}",
+        f"-ModifyDate{sign}={stamp}",
+    ]
+
+
+def gps_args(gps: str | None) -> list[str]:
+    """Exiftool GPS writer args for 'lat,lon'. Returns [] when None."""
+    if not gps:
+        return []
+    lat_s, lon_s = _parse_gps(gps)
+    return [
+        f"-GPSLatitude={lat_s}",
+        f"-GPSLongitude={lon_s}",
+        f"-GPSLatitudeRef={'N' if float(lat_s) >= 0 else 'S'}",
+        f"-GPSLongitudeRef={'E' if float(lon_s) >= 0 else 'W'}",
+    ]
 
 
 _COORD_RE = r"(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)"

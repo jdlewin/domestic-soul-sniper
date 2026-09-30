@@ -34,10 +34,10 @@ Enabled=false
 
 [Black & White]
 Enabled=true
-Method=Desaturation
+Method=ChannelMixer
 Auto=false
 ComplementaryColors=false
-Setting=Std_Film
+Setting=ROYGCBPM-Rel
 Filter=None
 MixerRed=35
 MixerOrange=40
@@ -107,5 +107,5 @@ OutputProfileIntent=Relative
 OutputBPC=true
 
 [RAW Bayer]
-Method=rcd
+Method=ChannelMixer
 Border=4

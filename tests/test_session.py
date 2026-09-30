@@ -94,6 +94,18 @@ def test_parse_gps_inputs():
         raise AssertionError("place-name link should error")
 
 
+def test_stock_recipes_exist():
+    from domestic_soul_sniper.grade import KNOWN_STOCKS
+    from domestic_soul_sniper.paths import recipe_pp3
+
+    assert set(KNOWN_STOCKS) == {"acros", "acros-ye", "acros-r", "acros-g"}
+    for stock in KNOWN_STOCKS:
+        pp3 = recipe_pp3(stock)
+        text = pp3.read_text(encoding="utf-8")
+        assert "[Black & White]" in text
+        assert "Enabled=true" in text
+
+
 def test_normalize_time_shift():
     from domestic_soul_sniper.meta import normalize_time_shift
 

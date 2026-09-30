@@ -52,6 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Import at most N RAF files (smoke/dev)",
     )
+    imp.add_argument(
+        "--correct-dt",
+        default=None,
+        help="Correct capture datetime for FIRST image 'YYYY-MM-DD HH:MM[:SS]' (applies delta to all)",
+    )
+    imp.add_argument(
+        "--gps",
+        default=None,
+        help="Shoot location LAT,LON or Google Maps link (stored on session for meta)",
+    )
+    imp.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip interactive date/time confirmation prompt",
+    )
 
     proof = sub.add_parser("proof", help="Write fast proof JPEGs (embedded previews)")
     proof.add_argument("session", type=Path, help="Session directory")
@@ -131,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
                 name=args.name,
                 shoot_date=args.date,
                 limit=args.limit,
+                correct_dt=args.correct_dt,
+                prompt=not bool(args.yes),
+                gps=args.gps,
             )
             print(f"Imported session: {session.path}")
             print(

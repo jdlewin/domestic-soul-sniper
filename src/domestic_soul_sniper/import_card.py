@@ -239,6 +239,25 @@ def _copy_hashed(src: Path, dest: Path, chunk: int = 1024 * 1024) -> str:
     return digest
 
 
+def ensure_dest_outside_source(source: Path, session_path: Path) -> Path:
+    """Refuse a session destination at or inside the source tree.
+
+    The import may READ the source tree but must never WRITE into it.
+    Call this before creating any destination directory: ``make_session_dir``
+    and ``Session.ensure_dirs`` both mkdir, so the check has to land first.
+    Returns the resolved session path. Raises RuntimeError otherwise.
+    """
+    src = source.expanduser().resolve()
+    dest = session_path.expanduser().resolve()
+    if dest == src or dest.is_relative_to(src):
+        raise RuntimeError(
+            "Refusing import: session destination is at or inside the "
+            f"source tree (source={src}, destination={dest}). "
+            "Point the archive root (or session) somewhere outside the card/source."
+        )
+    return dest
+
+
 def import_photos(
     cfg: UserConfig,
     source: Path,
@@ -312,6 +331,16 @@ def import_photos(
 
     sess_date = shoot_date or effective_first.date()
     slug = name or "shoot"
+    # Guard BEFORE make_session_dir mkdirs anything: the archive root (or a
+    # --name/slug trick resolving back under it) must not put the session
+    # inside the source tree. This is what makes the dest.unlink() in
+    # _copy_hashed safe — dest is guaranteed outside the source.
+    from .session import _slugify as _slugify_session
+
+    _candidate = (
+        cfg.archive_path() / f"{sess_date.year:04d}" / f"{sess_date.isoformat()}-{_slugify_session(slug)}"
+    )
+    ensure_dest_outside_source(source, _candidate)
     session_path = make_session_dir(cfg.archive_path(), sess_date, slug)
 
     session = Session(
